@@ -1,0 +1,5 @@
+Temporal CLI 1.7.0 (Server 1.31.0, UI 2.49.1)
+
+Temporal Server:  0.0.0.0:7233
+Temporal UI:      http://0.0.0.0:8233
+Temporal Metrics: http://0.0.0.0:33391/metrics
