@@ -88,6 +88,22 @@ TOOLS = [
         },
     },
     {
+        "name": "approve_all_fixes",
+        "description": "Approve all current fixable pods and execute fixes immediately.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "reject_all_fixes",
+        "description": "Reject all current fixable pods and end the healing decision process.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "reject_fix",
         "description": "Reject a proposed fix for a pod. The pod won't be modified. If all pods are decided, returns results.",
         "input_schema": {
@@ -110,7 +126,8 @@ How to behave:
 - When the user asks to heal/fix pods, use start_healing to scan and diagnose.
 - After start_healing, present the diagnoses clearly and ask which fixes to approve.
 - For "skip" actions (like missing ConfigMap), automatically reject them and explain why.
-- When the user says "approve all" or "fix everything", approve all fixable pods and reject skip-only ones.
+- When the user says "approve all" or "fix everything", use approve_all_fixes to approve all fixable pods.
+- When the user says "reject all" or "do not fix", use reject_all_fixes.
 - Always tell the user what you're about to do before taking action.
 
 Healing workflow:
@@ -325,6 +342,12 @@ class ConversationWorkflow:
             elif name == "approve_fix":
                 return await self._handle_approve_fix(tool_input["pod_name"])
 
+            elif name == "approve_all_fixes":
+                return await self._handle_approve_all_fixes()
+
+            elif name == "reject_all_fixes":
+                return await self._handle_reject_all_fixes()
+
             elif name == "reject_fix":
                 return await self._handle_reject_fix(tool_input["pod_name"])
 
@@ -367,8 +390,8 @@ class ConversationWorkflow:
             )
 
             diag_dict = {
-                "pod_name": diagnosis.pod_name,
-                "namespace": namespace,
+                "pod_name": issue.name,
+                "namespace": issue.namespace,
                 "root_cause": diagnosis.root_cause,
                 "severity": diagnosis.severity,
                 "action": diagnosis.action,
@@ -376,7 +399,11 @@ class ConversationWorkflow:
                 "fix_details": diagnosis.fix_details,
             }
             self._healing_diagnoses.append(diag_dict)
-            self._healing_pending.append(diagnosis.pod_name)
+
+            if diagnosis.action == "skip":
+                self._healing_decisions[issue.name] = "rejected"
+            else:
+                self._healing_pending.append(issue.name)
 
         lines = [f"Found {len(self._healing_diagnoses)} issue(s):\n"]
         for i, d in enumerate(self._healing_diagnoses, 1):
@@ -389,8 +416,27 @@ class ConversationWorkflow:
                 lines.append(f"     Fix Details: {d['fix_details']}")
             lines.append("")
 
-        lines.append(f"Pending approval: {', '.join(sorted(self._healing_pending))}")
+        if self._healing_pending:
+            lines.append(f"Pending approval: {', '.join(sorted(self._healing_pending))}")
+        else:
+            lines.append("No fixable pods require approval. Skipped all non-fixable issues automatically.")
         return "\n".join(lines)
+
+    async def _handle_approve_all_fixes(self) -> str:
+        if not self._healing_pending:
+            return "No fixable pods pending approval. Nothing to approve."
+        for pod_name in list(self._healing_pending):
+            self._healing_decisions[pod_name] = "approved"
+        self._healing_pending = []
+        return await self._execute_all_fixes()
+
+    async def _handle_reject_all_fixes(self) -> str:
+        if not self._healing_pending:
+            return "No fixable pods pending approval. Nothing to reject."
+        for pod_name in list(self._healing_pending):
+            self._healing_decisions[pod_name] = "rejected"
+        self._healing_pending = []
+        return await self._execute_all_fixes()
 
     async def _handle_approve_fix(self, pod_name: str) -> str:
         if not self._healing_pending:

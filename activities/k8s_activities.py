@@ -164,40 +164,33 @@ async def get_pod_details(pod_name: str, namespace: str) -> str:
     return details
 
 
-def _get_deployment_name(pod_name: str, namespace: str) -> str:
-    """Walk ownerReferences: Pod -> ReplicaSet -> Deployment.
+def _get_workload_name(pod_name: str, namespace: str) -> tuple[str, str]:
+    """Resolve the controlling workload for a pod.
 
-    This is the correct way to find the owning deployment.
-    Falls back to string-splitting heuristic if ownerReferences are missing.
+    Returns a tuple of (kind, name). Supports Deployment, StatefulSet, DaemonSet.
+    Falls back to string heuristic when no ownerReferences are present.
     """
     try:
         pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
 
-        # Find the owning ReplicaSet
-        rs_name = None
         if pod.metadata.owner_references:
             for ref in pod.metadata.owner_references:
                 if ref.kind == "ReplicaSet":
-                    rs_name = ref.name
-                    break
+                    rs = apps_v1.read_namespaced_replica_set(name=ref.name, namespace=namespace)
+                    if rs.metadata.owner_references:
+                        for rs_ref in rs.metadata.owner_references:
+                            if rs_ref.kind in ("Deployment", "StatefulSet"):
+                                return rs_ref.kind, rs_ref.name
+                    return "ReplicaSet", rs.metadata.name
+                if ref.kind in ("StatefulSet", "DaemonSet", "Job"):
+                    return ref.kind, ref.name
 
-        if not rs_name:
-            activity.logger.warning(f"Pod '{pod_name}' has no ReplicaSet owner, using string heuristic")
-            return _deployment_name_heuristic(pod_name)
-
-        # Find the owning Deployment from the ReplicaSet
-        rs = apps_v1.read_namespaced_replica_set(name=rs_name, namespace=namespace)
-        if rs.metadata.owner_references:
-            for ref in rs.metadata.owner_references:
-                if ref.kind == "Deployment":
-                    return ref.name
-
-        activity.logger.warning(f"ReplicaSet '{rs_name}' has no Deployment owner, using string heuristic")
-        return _deployment_name_heuristic(pod_name)
+        activity.logger.warning(f"Pod '{pod_name}' has no ownerReferences. Using string heuristic")
+        return "Deployment", _deployment_name_heuristic(pod_name)
 
     except Exception as e:
-        activity.logger.warning(f"ownerReferences lookup failed for '{pod_name}': {e}, using string heuristic")
-        return _deployment_name_heuristic(pod_name)
+        activity.logger.warning(f"ownerReferences lookup failed for '{pod_name}': {e}. Using string heuristic")
+        return "Deployment", _deployment_name_heuristic(pod_name)
 
 
 def _deployment_name_heuristic(pod_name: str) -> str:
@@ -268,11 +261,16 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
             details="Deleted pod to trigger restart",
         )
 
-    # For fix_image and patch_resources, we need the deployment
-    deployment_name = _get_deployment_name(pod_name, namespace)
+    # For fix_image and patch_resources, we need the workload controller.
+    workload_kind, workload_name = _get_workload_name(pod_name, namespace)
+
+    if workload_kind != "Deployment":
+        activity.logger.info(
+            f"Workload kind {workload_kind} is not a deployment. Using deployment-shaped patch against {workload_name}."
+        )
 
     deployment = apps_v1.read_namespaced_deployment(
-        name=deployment_name, namespace=namespace
+        name=workload_name, namespace=namespace
     )
     container_name = deployment.spec.template.spec.containers[0].name
 
@@ -287,16 +285,25 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
                 }
             }
         }
-        apps_v1.patch_namespaced_deployment(
-            name=deployment_name, namespace=namespace, body=patch
-        )
-        activity.logger.info(f"Patched deployment '{deployment_name}' image to '{correct_image}'")
-        return HealResult(
-            pod_name=pod_name,
-            success=True,
-            action_taken="fix_image",
-            details=f"Patched image to {correct_image}",
-        )
+        try:
+            apps_v1.patch_namespaced_deployment(
+                name=deployment_name, namespace=namespace, body=patch
+            )
+            activity.logger.info(f"Patched deployment '{deployment_name}' image to '{correct_image}'")
+            return HealResult(
+                pod_name=pod_name,
+                success=True,
+                action_taken="fix_image",
+                details=f"Patched image to {correct_image}",
+            )
+        except Exception as e:
+            activity.logger.error(f"Failed to patch image for '{deployment_name}': {e}")
+            return HealResult(
+                pod_name=pod_name,
+                success=False,
+                action_taken="fix_image_failed",
+                details=f"Failed to patch image: {e}",
+            )
 
     if action == "patch_resources":
         memory = diagnosis.fix_details["memory"]
@@ -312,16 +319,25 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
                 }
             }
         }
-        apps_v1.patch_namespaced_deployment(
-            name=deployment_name, namespace=namespace, body=patch
-        )
-        activity.logger.info(f"Patched deployment '{deployment_name}' memory limit to '{memory}'")
-        return HealResult(
-            pod_name=pod_name,
-            success=True,
-            action_taken="patch_resources",
-            details=f"Patched memory limit to {memory}",
-        )
+        try:
+            apps_v1.patch_namespaced_deployment(
+                name=deployment_name, namespace=namespace, body=patch
+            )
+            activity.logger.info(f"Patched deployment '{deployment_name}' memory limit to '{memory}'")
+            return HealResult(
+                pod_name=pod_name,
+                success=True,
+                action_taken="patch_resources",
+                details=f"Patched memory limit to {memory}",
+            )
+        except Exception as e:
+            activity.logger.error(f"Failed to patch resources for '{deployment_name}': {e}")
+            return HealResult(
+                pod_name=pod_name,
+                success=False,
+                action_taken="patch_resources_failed",
+                details=f"Failed to patch resources: {e}",
+            )
 
     return HealResult(
         pod_name=pod_name,
