@@ -201,6 +201,30 @@ def _deployment_name_heuristic(pod_name: str) -> str:
     return pod_name
 
 
+def _read_workload(workload_kind: str, workload_name: str, namespace: str):
+    if workload_kind == "Deployment":
+        return apps_v1.read_namespaced_deployment(name=workload_name, namespace=namespace)
+    if workload_kind == "StatefulSet":
+        return apps_v1.read_namespaced_stateful_set(name=workload_name, namespace=namespace)
+    if workload_kind == "DaemonSet":
+        return apps_v1.read_namespaced_daemon_set(name=workload_name, namespace=namespace)
+    if workload_kind == "ReplicaSet":
+        return apps_v1.read_namespaced_replica_set(name=workload_name, namespace=namespace)
+    raise ValueError(f"Unsupported workload kind: {workload_kind}")
+
+
+def _patch_workload(workload_kind: str, workload_name: str, namespace: str, patch: dict):
+    if workload_kind == "Deployment":
+        return apps_v1.patch_namespaced_deployment(name=workload_name, namespace=namespace, body=patch)
+    if workload_kind == "StatefulSet":
+        return apps_v1.patch_namespaced_stateful_set(name=workload_name, namespace=namespace, body=patch)
+    if workload_kind == "DaemonSet":
+        return apps_v1.patch_namespaced_daemon_set(name=workload_name, namespace=namespace, body=patch)
+    if workload_kind == "ReplicaSet":
+        return apps_v1.patch_namespaced_replica_set(name=workload_name, namespace=namespace, body=patch)
+    raise ValueError(f"Unsupported workload kind: {workload_kind}")
+
+
 def _validate_fix(diagnosis: Diagnosis) -> str | None:
     """Validate LLM-generated fix before executing. Returns error string or None."""
     if diagnosis.action not in VALID_ACTIONS:
@@ -266,13 +290,11 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
 
     if workload_kind != "Deployment":
         activity.logger.info(
-            f"Workload kind {workload_kind} is not a deployment. Using deployment-shaped patch against {workload_name}."
+            f"Workload kind {workload_kind} is not a deployment. Using workload-shaped patch against {workload_name}."
         )
 
-    deployment = apps_v1.read_namespaced_deployment(
-        name=workload_name, namespace=namespace
-    )
-    container_name = deployment.spec.template.spec.containers[0].name
+    workload = _read_workload(workload_kind, workload_name, namespace)
+    container_name = workload.spec.template.spec.containers[0].name
 
     if action == "fix_image":
         correct_image = diagnosis.fix_details["image"]
@@ -286,10 +308,15 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
             }
         }
         try:
-            apps_v1.patch_namespaced_deployment(
-                name=deployment_name, namespace=namespace, body=patch
+            _patch_workload(
+                workload_kind=workload_kind,
+                workload_name=workload_name,
+                namespace=namespace,
+                patch=patch,
             )
-            activity.logger.info(f"Patched deployment '{deployment_name}' image to '{correct_image}'")
+            activity.logger.info(
+                f"Patched {workload_kind} '{workload_name}' image to '{correct_image}'"
+            )
             return HealResult(
                 pod_name=pod_name,
                 success=True,
@@ -297,7 +324,9 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
                 details=f"Patched image to {correct_image}",
             )
         except Exception as e:
-            activity.logger.error(f"Failed to patch image for '{deployment_name}': {e}")
+            activity.logger.error(
+                f"Failed to patch image for '{workload_kind}/{workload_name}': {e}"
+            )
             return HealResult(
                 pod_name=pod_name,
                 success=False,
@@ -320,10 +349,15 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
             }
         }
         try:
-            apps_v1.patch_namespaced_deployment(
-                name=deployment_name, namespace=namespace, body=patch
+            _patch_workload(
+                workload_kind=workload_kind,
+                workload_name=workload_name,
+                namespace=namespace,
+                patch=patch,
             )
-            activity.logger.info(f"Patched deployment '{deployment_name}' memory limit to '{memory}'")
+            activity.logger.info(
+                f"Patched {workload_kind} '{workload_name}' memory limit to '{memory}'"
+            )
             return HealResult(
                 pod_name=pod_name,
                 success=True,
@@ -331,7 +365,9 @@ async def execute_fix(diagnosis: Diagnosis) -> HealResult:
                 details=f"Patched memory limit to {memory}",
             )
         except Exception as e:
-            activity.logger.error(f"Failed to patch resources for '{deployment_name}': {e}")
+            activity.logger.error(
+                f"Failed to patch resources for '{workload_kind}/{workload_name}': {e}"
+            )
             return HealResult(
                 pod_name=pod_name,
                 success=False,

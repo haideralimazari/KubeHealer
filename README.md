@@ -125,8 +125,11 @@ temporal server start-dev
 
 **Terminal 3 — Install dependencies & start worker:**
 ```bash
-python3 -m venv venv
+python -m venv venv
+# macOS / Linux
 source venv/bin/activate
+# Windows PowerShell
+# .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 cp .env.example .env   # Add your GROQ_API_KEY
 python worker.py
@@ -134,7 +137,10 @@ python worker.py
 
 **Terminal 4 — Start chatting:**
 ```bash
+# macOS / Linux
 source venv/bin/activate
+# Windows PowerShell
+# .\venv\Scripts\Activate.ps1
 python cli.py
 ```
 
